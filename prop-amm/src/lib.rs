@@ -11,7 +11,7 @@ struct ComputeSwapInstruction {
     input_amount: u64,
     reserve_x: u64,
     reserve_y: u64,
-    _storage: [u8; STORAGE_SIZE],
+    storage: [u8; STORAGE_SIZE],
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
