@@ -1,5 +1,4 @@
-use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
-use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64, set_storage};
+use prop_amm_submission_sdk::set_storage;
 
 const NAME: &str = "VirtualConc4";
 const MODEL_USED: &str = "claude-sonnet-4-6";
@@ -45,27 +44,6 @@ struct AfterSwapArgs {
     storage: [u8; STORAGE_SIZE],
 }
 
-#[cfg(not(feature = "no-entrypoint"))]
-entrypoint!(process_instruction);
-
-pub fn process_instruction(
-    _program_id: &Pubkey,
-    _accounts: &[AccountInfo],
-    data: &[u8],
-) -> ProgramResult {
-    if data.is_empty() {
-        return Ok(());
-    }
-    match data[0] {
-        0 | 1 => { set_return_data_u64(compute_swap(data)); }
-        2     => { after_swap(data); }
-        3     => { set_return_data_bytes(NAME.as_bytes()); }
-        4     => { set_return_data_bytes(get_model_used().as_bytes()); }
-        _     => {}
-    }
-    Ok(())
-}
-
 pub fn get_model_used() -> &'static str { MODEL_USED }
 
 pub fn compute_swap(data: &[u8]) -> u64 {
@@ -92,7 +70,9 @@ pub fn compute_swap(data: &[u8]) -> u64 {
     };
 
     let out = (vr_out * amt) / (vr_in + amt);
-    cu128(if out > cap { cap } else { out }, 1, cap) as u64
+    let final_out = if out > cap { cap } else { out };
+    if final_out == 0 { return 0; }
+    final_out as u64
 }
 
 pub fn after_swap(data: &[u8]) {
@@ -165,47 +145,6 @@ pub fn after_swap(data: &[u8]) {
     set_storage(&st);
 }
 
-fn toxicity_fee(buy_vol: u64, sell_vol: u64) -> u128 {
-    let max_extra: u128 = SCALE128 / 100;
-    let total = buy_vol as u128 + sell_vol as u128;
-    if total == 0 { return 0; }
-    let dominant  = if buy_vol > sell_vol { buy_vol as u128 } else { sell_vol as u128 };
-    let ratio     = (dominant * SCALE128) / total;
-    let threshold = SCALE128 / 2 + SCALE128 / 10;
-    if ratio <= threshold { return 0; }
-    let excess = ratio - SCALE128 / 2;
-    cu128((excess * max_extra) / (SCALE128 / 2), 0, max_extra)
-}
-
-fn volatility_fee(ema_var: u64, trade_count: u64) -> u128 {
-    let max_extra: u128 = (SCALE128 * 15) / 1000;
-    if trade_count < 10 || ema_var == 0 { return 0; }
-    let calm: u64 = 1_000;
-    if ema_var <= calm { return 0; }
-    let excess = (ema_var - calm) as u128;
-    let ratio  = (excess * SCALE128) / calm as u128;
-    let capped = cu128(ratio, 0, 10 * SCALE128);
-    (capped * max_extra) / (10 * SCALE128)
-}
-
-fn inventory_mult(skew: i64, side: u8) -> u128 {
-    let max_shift: i128 = (SCALE128 as i128 * 8) / 1000;
-    let max_skew: i64   = (100 * SCALE) as i64;
-    let clamped = if skew > max_skew { max_skew } else if skew < -max_skew { -max_skew } else { skew };
-    let norm: i128     = (clamped as i128 * SCALE128 as i128) / max_skew as i128;
-    let abs_norm: i128 = if norm < 0 { -norm } else { norm };
-    let shift: i128    = (abs_norm * max_shift) / SCALE128 as i128;
-    let signed: i128   = if side == 0 {
-        if skew > 0 { shift } else { -shift }
-    } else {
-        if skew > 0 { -shift } else { shift }
-    };
-    let mult = SCALE128 as i128 + signed;
-    let lo = SCALE128 as i128 / 2;
-    let hi = (SCALE128 as i128 * 3) / 2;
-    (if mult < lo { lo } else if mult > hi { hi } else { mult }) as u128
-}
-
 fn update_regime(czero: u64, cfull: u64, fee: u64, executed: bool) -> (u64, u64, u64) {
     if executed {
         let nf = cfull.saturating_add(1);
@@ -233,10 +172,6 @@ fn u64_diff(a: u64, b: u64) -> u64 {
 }
 
 fn cu64(val: u64, lo: u64, hi: u64) -> u64 {
-    if val < lo { lo } else if val > hi { hi } else { val }
-}
-
-fn cu128(val: u128, lo: u128, hi: u128) -> u128 {
     if val < lo { lo } else if val > hi { hi } else { val }
 }
 
