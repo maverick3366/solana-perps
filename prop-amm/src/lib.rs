@@ -1,4 +1,5 @@
-use prop_amm_submission_sdk::set_storage;
+use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
+use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64, set_storage};
 
 const NAME: &str = "VirtualConc4";
 const MODEL_USED: &str = "claude-sonnet-4-6";
@@ -24,68 +25,102 @@ const INIT_FEE: u64  = 300;
 const FEE_STEP: u64  = 20;
 
 #[derive(wincode::SchemaRead)]
-struct SwapArgs {
+struct ComputeSwapInstruction {
     side: u8,
     input_amount: u64,
     reserve_x: u64,
     reserve_y: u64,
-    storage: [u8; STORAGE_SIZE],
+    _storage: [u8; STORAGE_SIZE],
 }
 
 #[derive(wincode::SchemaRead)]
-struct AfterSwapArgs {
-    tag: u8,
+struct AfterSwapInstruction {
+    _tag: u8,
     side: u8,
     input_amount: u64,
     output_amount: u64,
     reserve_x: u64,
     reserve_y: u64,
-    step: u64,
+    _step: u64,
     storage: [u8; STORAGE_SIZE],
 }
 
-pub fn get_model_used() -> &'static str { MODEL_USED }
+#[cfg(not(feature = "no-entrypoint"))]
+entrypoint!(process_instruction);
+
+pub fn process_instruction(
+    _program_id: &Pubkey,
+    _accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    if instruction_data.is_empty() {
+        return Ok(());
+    }
+    match instruction_data[0] {
+        0 | 1 => {
+            let output = compute_swap(instruction_data);
+            set_return_data_u64(output);
+        }
+        2 => {
+            after_swap(instruction_data);
+        }
+        3 => set_return_data_bytes(NAME.as_bytes()),
+        4 => set_return_data_bytes(get_model_used().as_bytes()),
+        _ => {}
+    }
+    Ok(())
+}
+
+pub fn get_model_used() -> &'static str {
+    MODEL_USED
+}
 
 pub fn compute_swap(data: &[u8]) -> u64 {
-    let args: SwapArgs = match wincode::deserialize(data) {
-        Ok(a) => a,
+    let decoded: ComputeSwapInstruction = match wincode::deserialize(data) {
+        Ok(decoded) => decoded,
         Err(_) => return 0,
     };
-    let input = args.input_amount as u128;
-    let rx    = args.reserve_x as u128;
-    let ry    = args.reserve_y as u128;
-    let side  = args.side;
+    let side = decoded.side;
+    let input_amount = decoded.input_amount as u128;
+    let reserve_x = decoded.reserve_x as u128;
+    let reserve_y = decoded.reserve_y as u128;
 
-    if input == 0 || rx == 0 || ry == 0 { return 0; }
+    if reserve_x == 0 || reserve_y == 0 {
+        return 0;
+    }
 
-    let amt = input * 9990 / 10000;
+    let amt = input_amount * 9990 / 10000;
+    let vrx = reserve_x * 4;
+    let vry = reserve_y * 4;
 
-    let vrx = rx * 4;
-    let vry = ry * 4;
-
-    let (vr_in, vr_out, cap) = if side == 0 {
-        (vry, vrx, rx.saturating_sub(1))
-    } else {
-        (vrx, vry, ry.saturating_sub(1))
-    };
-
-    let out = (vr_out * amt) / (vr_in + amt);
-    let final_out = if out > cap { cap } else { out };
-    if final_out == 0 { return 0; }
-    final_out as u64
+    match side {
+        0 => {
+            let new_vry = vry + amt;
+            let out = (vrx * amt) / new_vry;
+            let cap = reserve_x.saturating_sub(1);
+            if out > cap { cap as u64 } else { out as u64 }
+        }
+        1 => {
+            let new_vrx = vrx + amt;
+            let out = (vry * amt) / new_vrx;
+            let cap = reserve_y.saturating_sub(1);
+            if out > cap { cap as u64 } else { out as u64 }
+        }
+        _ => 0,
+    }
 }
 
 pub fn after_swap(data: &[u8]) {
-    let args: AfterSwapArgs = match wincode::deserialize(data) {
-        Ok(a) => a,
+    let decoded: AfterSwapInstruction = match wincode::deserialize(data) {
+        Ok(decoded) => decoded,
         Err(_) => return,
     };
-    let side       = args.side;
-    let amount_in  = args.input_amount;
-    let amount_out = args.output_amount;
-    let reserve_x  = args.reserve_x;
-    let reserve_y  = args.reserve_y;
-    let mut st     = args.storage;
+    let side       = decoded.side;
+    let amount_in  = decoded.input_amount;
+    let amount_out = decoded.output_amount;
+    let reserve_x  = decoded.reserve_x;
+    let reserve_y  = decoded.reserve_y;
+    let mut st     = decoded.storage;
 
     let trade_count  = rd64(&st, OFF_TRADE_COUNT);
     let ema_price    = rd64(&st, OFF_EMA_PRICE);
@@ -176,23 +211,23 @@ fn cu64(val: u64, lo: u64, hi: u64) -> u64 {
 }
 
 fn rd64(buf: &[u8; STORAGE_SIZE], off: usize) -> u64 {
-    (buf[off]     as u64)
-        | ((buf[off+1] as u64) << 8)
-        | ((buf[off+2] as u64) << 16)
-        | ((buf[off+3] as u64) << 24)
-        | ((buf[off+4] as u64) << 32)
-        | ((buf[off+5] as u64) << 40)
-        | ((buf[off+6] as u64) << 48)
-        | ((buf[off+7] as u64) << 56)
+    (buf[off] as u64)
+        | ((buf[off + 1] as u64) << 8)
+        | ((buf[off + 2] as u64) << 16)
+        | ((buf[off + 3] as u64) << 24)
+        | ((buf[off + 4] as u64) << 32)
+        | ((buf[off + 5] as u64) << 40)
+        | ((buf[off + 6] as u64) << 48)
+        | ((buf[off + 7] as u64) << 56)
 }
 
 fn wr64(buf: &mut [u8; STORAGE_SIZE], off: usize, val: u64) {
-    buf[off]   = (val & 0xFF) as u8;
-    buf[off+1] = ((val >>  8) & 0xFF) as u8;
-    buf[off+2] = ((val >> 16) & 0xFF) as u8;
-    buf[off+3] = ((val >> 24) & 0xFF) as u8;
-    buf[off+4] = ((val >> 32) & 0xFF) as u8;
-    buf[off+5] = ((val >> 40) & 0xFF) as u8;
-    buf[off+6] = ((val >> 48) & 0xFF) as u8;
-    buf[off+7] = ((val >> 56) & 0xFF) as u8;
+    buf[off]     = (val & 0xFF) as u8;
+    buf[off + 1] = ((val >> 8) & 0xFF) as u8;
+    buf[off + 2] = ((val >> 16) & 0xFF) as u8;
+    buf[off + 3] = ((val >> 24) & 0xFF) as u8;
+    buf[off + 4] = ((val >> 32) & 0xFF) as u8;
+    buf[off + 5] = ((val >> 40) & 0xFF) as u8;
+    buf[off + 6] = ((val >> 48) & 0xFF) as u8;
+    buf[off + 7] = ((val >> 56) & 0xFF) as u8;
 }
