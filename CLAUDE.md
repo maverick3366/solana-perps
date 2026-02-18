@@ -108,12 +108,23 @@ cargo test --features no-entrypoint
 - `wincode` — schema-based deserialization (`SchemaRead` derive, `deserialize`)
 
 ### Platform submission rules (critical)
-- `compute_swap` must be `pub fn compute_swap` at top level
-- `NAME` must be `const NAME: &str` at top level
+- `compute_swap` must be `pub fn compute_swap` at top level (never gated)
+- `NAME` must be `const NAME: &str` at top level (never gated)
 - Structs must use `#[derive(wincode::SchemaRead)]`
 - Storage field in structs must be named `storage` (never `_storage`)
-- Only `entrypoint!(process_instruction)` is gated behind `#[cfg(not(feature = "no-entrypoint"))]`
-- `process_instruction` itself is NOT behind a cfg guard (platform calls it directly)
+- Native compilation: platform compiles without pinocchio → ALL pinocchio imports
+  AND `process_instruction` AND `set_return_data_*` imports MUST be gated:
+  ```
+  #[cfg(not(feature = "no-entrypoint"))]
+  use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64};
+  #[cfg(not(feature = "no-entrypoint"))]
+  use pinocchio::{...};
+  #[cfg(not(feature = "no-entrypoint"))]
+  entrypoint!(process_instruction);
+  #[cfg(not(feature = "no-entrypoint"))]
+  pub fn process_instruction(...) { ... }
+  ```
+- `set_storage` (used in `after_swap`) is imported ungated — SDK provides native stub
 - Submit raw Rust source only — no markdown, no comments explaining strategy
 
 ---
