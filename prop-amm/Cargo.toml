@@ -1,0 +1,19 @@
+[package]
+name = "prop-amm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = []
+no-entrypoint = []
+
+[dependencies]
+prop_amm_submission_sdk = { version = "*" }
+wincode = { version = "*" }
+pinocchio = { version = "*", optional = true }
+
+[target.'cfg(not(feature = "no-entrypoint"))'.dependencies]
+pinocchio = { version = "*" }
