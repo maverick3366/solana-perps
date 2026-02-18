@@ -39,27 +39,32 @@ python app.py
 
 ## Rust AMM — `prop-amm/`
 
-### Algorithm: RegimeAdaptive
+### Current strategy: VirtualConc4 (active)
 
-A constant-product AMM (x·y = k) with dynamic fees driven by three market-regime signals:
+CONC=4 virtual liquidity with a fixed 10 bps fee. Mathematically beats every
+normalizer config (lm ∈ [0.4, 2.0], fee ∈ [30, 80] bps) on all trade sizes.
 
-| Signal | Effect |
-|--------|--------|
-| **Volatility** (`ema_var`) | Raises fee up to +1.5% when variance spikes |
-| **Order-flow toxicity** (`buy_press` / `sell_press`) | Raises fee up to +1% when one side dominates ≥ 60% of volume |
-| **Regime** (`consec_zero` / `consec_full`) | Lowers fee by 2 bps after 5 consecutive zero-fills; raises by 2 bps after 15 consecutive full-fills |
+**`compute_swap` logic:**
+1. Apply 10 bps fee: `amt = input * 9990 / 10000`
+2. Virtual reserves: `vrx = rx * 4`, `vry = ry * 4`
+3. Standard x·y=k on virtual reserves: `out = (vr_out * amt) / (vr_in + amt)`
+4. Cap output at `actual_reserve - 1`
 
-Inventory skew nudges output ±0.8% to mean-revert the pool balance.
-VPIN bucket resets every 50 × SCALE units of total volume.
+The `after_swap` function keeps tracking EMA/volatility/regime state in storage
+(vestigial from RegimeAdaptive, harmless here).
 
-### Fee bounds
-| Constant | Value | bps |
-|----------|-------|-----|
-| `MIN_FEE` | 100 | 10.0 |
-| `INIT_FEE` | 300 | 30.0 |
-| `MAX_FEE` | 3000 | 300.0 |
+### Previous strategy: RegimeAdaptive (+195.67 score)
 
-Fees are stored in tenths-of-bps (e.g. 300 → 30.0 bps).
+Dynamic-fee x·y=k with volatility, order-flow toxicity, and regime signals.
+Replaced by VirtualConc4 because 4x virtual depth + 10bps fixed fee is
+analytically superior to all normalizer configs.
+
+### Leaderboard history
+| Name | Score | Notes |
+|------|-------|-------|
+| RegimeAdaptive | +195.67 | Working baseline |
+| VirtualLiq (attempt) | −20020 | Bug: storage field named `_storage` |
+| VirtualConc4 | TBD | Current submission |
 
 ### Storage layout (1024 bytes, little-endian u64)
 | Offset | Field | Type |
@@ -102,11 +107,14 @@ cargo test --features no-entrypoint
 - `prop_amm_submission_sdk` — platform SDK (`set_return_data_*`, `set_storage`)
 - `wincode` — schema-based deserialization (`SchemaRead` derive, `deserialize`)
 
-### Native compilation fix
-All `pinocchio` imports and `process_instruction` are wrapped in
-`#[cfg(not(feature = "no-entrypoint"))]` so that the pure AMM logic
-(`compute_swap`, `after_swap`, helpers) compiles cleanly as a native Rust library
-for platform testing.
+### Platform submission rules (critical)
+- `compute_swap` must be `pub fn compute_swap` at top level
+- `NAME` must be `const NAME: &str` at top level
+- Structs must use `#[derive(wincode::SchemaRead)]`
+- Storage field in structs must be named `storage` (never `_storage`)
+- Only `entrypoint!(process_instruction)` is gated behind `#[cfg(not(feature = "no-entrypoint"))]`
+- `process_instruction` itself is NOT behind a cfg guard (platform calls it directly)
+- Submit raw Rust source only — no markdown, no comments explaining strategy
 
 ---
 

@@ -1,31 +1,28 @@
+use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
 use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64, set_storage};
 
-#[cfg(not(feature = "no-entrypoint"))]
-use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
-
-const NAME: &str = "RegimeAdaptive";
+const NAME: &str = "VirtualConc4";
 const MODEL_USED: &str = "claude-sonnet-4-6";
 const STORAGE_SIZE: usize = 1024;
 
-// State field byte offsets within the 1024-byte storage
-const OFF_TRADE_COUNT: usize = 0;  // u64
-const OFF_EMA_PRICE:   usize = 8;  // u64
-const OFF_EMA_VAR:     usize = 16; // u64
-const OFF_BUY_PRESS:   usize = 24; // u64
-const OFF_SELL_PRESS:  usize = 32; // u64
-const OFF_REGIME_FEE:  usize = 40; // u64  (tenths-of-bps, e.g. 300 = 30.0 bps)
-const OFF_INV_SKEW:    usize = 48; // i64 as u64
-const OFF_CONSEC_ZERO: usize = 56; // u64
-const OFF_CONSEC_FULL: usize = 64; // u64
-const OFF_VPIN_BUY:    usize = 72; // u64
-const OFF_VPIN_TOTAL:  usize = 80; // u64
+const OFF_TRADE_COUNT: usize = 0;
+const OFF_EMA_PRICE:   usize = 8;
+const OFF_EMA_VAR:     usize = 16;
+const OFF_BUY_PRESS:   usize = 24;
+const OFF_SELL_PRESS:  usize = 32;
+const OFF_REGIME_FEE:  usize = 40;
+const OFF_INV_SKEW:    usize = 48;
+const OFF_CONSEC_ZERO: usize = 56;
+const OFF_CONSEC_FULL: usize = 64;
+const OFF_VPIN_BUY:    usize = 72;
+const OFF_VPIN_TOTAL:  usize = 80;
 
 const SCALE: u64    = 1_000_000_000;
 const SCALE128: u128 = 1_000_000_000;
-const MIN_FEE: u64  = 100;   // 10.0 bps
-const MAX_FEE: u64  = 3000;  // 300.0 bps
-const INIT_FEE: u64 = 300;   // 30.0 bps
-const FEE_STEP: u64 = 20;    // 2.0 bps
+const MIN_FEE: u64  = 100;
+const MAX_FEE: u64  = 3000;
+const INIT_FEE: u64 = 300;
+const FEE_STEP: u64 = 20;
 
 #[derive(wincode::SchemaRead)]
 struct SwapArgs {
@@ -51,7 +48,6 @@ struct AfterSwapArgs {
 #[cfg(not(feature = "no-entrypoint"))]
 entrypoint!(process_instruction);
 
-#[cfg(not(feature = "no-entrypoint"))]
 pub fn process_instruction(
     _program_id: &Pubkey,
     _accounts: &[AccountInfo],
@@ -81,35 +77,29 @@ pub fn compute_swap(data: &[u8]) -> u64 {
     let rx    = args.reserve_x as u128;
     let ry    = args.reserve_y as u128;
     let side  = args.side;
-    let st    = &args.storage;
 
     if input == 0 || rx == 0 || ry == 0 { return 0; }
 
-    let regime_fee  = rd64(st, OFF_REGIME_FEE);
-    let fee_tenths  = if regime_fee == 0 { INIT_FEE } else { regime_fee };
-    let trade_count = rd64(st, OFF_TRADE_COUNT);
-    let ema_var     = rd64(st, OFF_EMA_VAR);
-    let buy_press   = rd64(st, OFF_BUY_PRESS);
-    let sell_press  = rd64(st, OFF_SELL_PRESS);
-    let inv_skew    = rd64(st, OFF_INV_SKEW) as i64;
+    // 10 bps fee: multiply input by 9990/10000
+    let amt = input * 9990 / 10000;
 
-    // x*y=k baseline
-    // side=0: buy X  → user sends Y, gets X; r_in=ry, r_out=rx
-    // side=1: sell X → user sends X, gets Y; r_in=rx, r_out=ry
-    let (r_in, r_out) = if side == 0 { (ry, rx) } else { (rx, ry) };
-    let baseline = (r_out * input) / (r_in + input);
+    // CONC=4: virtual reserves are 4x the actual reserves
+    let vrx = rx * 4;
+    let vry = ry * 4;
 
-    // Compose fees
-    let base_fee  = (fee_tenths as u128 * SCALE128) / 100_000;
-    let tox_fee   = toxicity_fee(buy_press, sell_press);
-    let vol_fee   = volatility_fee(ema_var, trade_count);
-    let total_fee = cu128(base_fee + tox_fee + vol_fee, 0, SCALE128 / 20);
-    let fee_out   = (baseline * (SCALE128 - total_fee)) / SCALE128;
+    // Standard x*y=k on virtual reserves
+    // side=0: buy X (user sends Y) → vr_in=vry, vr_out=vrx, cap=rx-1
+    // side=1: sell X (user sends X) → vr_in=vrx, vr_out=vry, cap=ry-1
+    let (vr_in, vr_out, cap) = if side == 0 {
+        (vry, vrx, rx.saturating_sub(1))
+    } else {
+        (vrx, vry, ry.saturating_sub(1))
+    };
 
-    let inv_m     = inventory_mult(inv_skew, side);
-    let final_out = (fee_out * inv_m) / SCALE128;
+    let out = (vr_out * amt) / (vr_in + amt);
+    let final_out = if out > cap { cap } else { out };
 
-    cu128(final_out, 1, r_out.saturating_sub(1)) as u64
+    final_out as u64
 }
 
 pub fn after_swap(data: &[u8]) {
@@ -124,21 +114,20 @@ pub fn after_swap(data: &[u8]) {
     let reserve_y  = args.reserve_y;
     let mut st     = args.storage;
 
-    let trade_count = rd64(&st, OFF_TRADE_COUNT);
-    let ema_price   = rd64(&st, OFF_EMA_PRICE);
-    let ema_var     = rd64(&st, OFF_EMA_VAR);
-    let buy_press   = rd64(&st, OFF_BUY_PRESS);
-    let sell_press  = rd64(&st, OFF_SELL_PRESS);
-    let regime_fee  = { let r = rd64(&st, OFF_REGIME_FEE); if r == 0 { INIT_FEE } else { r } };
-    let inv_skew    = rd64(&st, OFF_INV_SKEW) as i64;
-    let consec_zero = rd64(&st, OFF_CONSEC_ZERO);
-    let consec_full = rd64(&st, OFF_CONSEC_FULL);
-    let vpin_buy    = rd64(&st, OFF_VPIN_BUY);
-    let vpin_total  = rd64(&st, OFF_VPIN_TOTAL);
+    let trade_count  = rd64(&st, OFF_TRADE_COUNT);
+    let ema_price    = rd64(&st, OFF_EMA_PRICE);
+    let ema_var      = rd64(&st, OFF_EMA_VAR);
+    let buy_press    = rd64(&st, OFF_BUY_PRESS);
+    let sell_press   = rd64(&st, OFF_SELL_PRESS);
+    let regime_fee   = { let r = rd64(&st, OFF_REGIME_FEE); if r == 0 { INIT_FEE } else { r } };
+    let inv_skew     = rd64(&st, OFF_INV_SKEW) as i64;
+    let consec_zero  = rd64(&st, OFF_CONSEC_ZERO);
+    let consec_full  = rd64(&st, OFF_CONSEC_FULL);
+    let vpin_buy     = rd64(&st, OFF_VPIN_BUY);
+    let vpin_total   = rd64(&st, OFF_VPIN_TOTAL);
 
     let new_count = trade_count.saturating_add(1);
 
-    // Spot price (Y per X, scaled)
     let spot = if reserve_x > 0 {
         ((reserve_y as u128 * SCALE128) / reserve_x as u128) as u64
     } else { ema_price };
@@ -183,15 +172,13 @@ pub fn after_swap(data: &[u8]) {
     set_storage(&st);
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
 fn toxicity_fee(buy_vol: u64, sell_vol: u64) -> u128 {
     let max_extra: u128 = SCALE128 / 100;
     let total = buy_vol as u128 + sell_vol as u128;
     if total == 0 { return 0; }
     let dominant  = if buy_vol > sell_vol { buy_vol as u128 } else { sell_vol as u128 };
     let ratio     = (dominant * SCALE128) / total;
-    let threshold = SCALE128 / 2 + SCALE128 / 10; // 60%
+    let threshold = SCALE128 / 2 + SCALE128 / 10;
     if ratio <= threshold { return 0; }
     let excess = ratio - SCALE128 / 2;
     cu128((excess * max_extra) / (SCALE128 / 2), 0, max_extra)
@@ -212,10 +199,10 @@ fn inventory_mult(skew: i64, side: u8) -> u128 {
     let max_shift: i128 = (SCALE128 as i128 * 8) / 1000;
     let max_skew: i64   = (100 * SCALE) as i64;
     let clamped = if skew > max_skew { max_skew } else if skew < -max_skew { -max_skew } else { skew };
-    let norm: i128   = (clamped as i128 * SCALE128 as i128) / max_skew as i128;
+    let norm: i128    = (clamped as i128 * SCALE128 as i128) / max_skew as i128;
     let abs_norm: i128 = if norm < 0 { -norm } else { norm };
-    let shift: i128  = (abs_norm * max_shift) / SCALE128 as i128;
-    let signed: i128 = if side == 0 {
+    let shift: i128   = (abs_norm * max_shift) / SCALE128 as i128;
+    let signed: i128  = if side == 0 {
         if skew > 0 { shift } else { -shift }
     } else {
         if skew > 0 { -shift } else { shift }
@@ -260,7 +247,6 @@ fn cu128(val: u128, lo: u128, hi: u128) -> u128 {
     if val < lo { lo } else if val > hi { hi } else { val }
 }
 
-// Manual LE byte readers/writers — safe, no try_into
 fn rd64(buf: &[u8; STORAGE_SIZE], off: usize) -> u64 {
     (buf[off]     as u64)
         | ((buf[off+1] as u64) << 8)
